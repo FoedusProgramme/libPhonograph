@@ -10,5 +10,7 @@ interface Album : Item {
 	val albumArtist: String?
 	val albumArtistId: Long?
 	val albumYear: Int? // Last year
+	val albumAddDate: Long?
+	val albumModifiedDate: Long?
 	val cover: Uri?
 }

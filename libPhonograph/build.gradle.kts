@@ -52,6 +52,7 @@ android {
 
 dependencies {
     implementation("androidx.core:core-ktx:1.15.0")
+    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.9.4")
     implementation("androidx.media3:media3-common:1.6.0-alpha03")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.1")
 }

@@ -6,10 +6,14 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.MediaStore
+import android.util.Log
 import androidx.annotation.OptIn
+import androidx.media3.common.HeartRating
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.util.UnstableApi
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.supervisorScope
 import uk.akane.libphonograph.Constants
 import uk.akane.libphonograph.getColumnIndexOrNull
 import uk.akane.libphonograph.getIntOrNullIfThrow
@@ -24,6 +28,7 @@ import uk.akane.libphonograph.items.Artist
 import uk.akane.libphonograph.items.Date
 import uk.akane.libphonograph.items.EXTRA_ADD_DATE
 import uk.akane.libphonograph.items.EXTRA_ALBUM_ID
+import uk.akane.libphonograph.items.EXTRA_ALBUM_YEAR
 import uk.akane.libphonograph.items.EXTRA_ARTIST_ID
 import uk.akane.libphonograph.items.EXTRA_AUTHOR
 import uk.akane.libphonograph.items.EXTRA_CD_TRACK_NUMBER
@@ -31,6 +36,9 @@ import uk.akane.libphonograph.items.EXTRA_MODIFIED_DATE
 import uk.akane.libphonograph.items.FileNode
 import uk.akane.libphonograph.items.Genre
 import uk.akane.libphonograph.items.RawPlaylist
+import uk.akane.libphonograph.items.addDate
+import uk.akane.libphonograph.items.modifiedDate
+import uk.akane.libphonograph.manipulator.PlaylistSerializer
 import uk.akane.libphonograph.putIfAbsentSupport
 import uk.akane.libphonograph.toUriCompat
 import uk.akane.libphonograph.utils.MiscUtils
@@ -39,8 +47,10 @@ import uk.akane.libphonograph.utils.MiscUtils.findBestCover
 import uk.akane.libphonograph.utils.MiscUtils.handleMediaFolder
 import uk.akane.libphonograph.utils.MiscUtils.handleShallowMediaItem
 import java.io.File
+import java.io.IOException
 import java.time.Instant
 import java.time.ZoneId
+import kotlin.math.min
 
 internal object Reader {
     // not actually defined in API, but CTS tested
@@ -80,6 +90,7 @@ internal object Reader {
                 add(MediaStore.Audio.Media.WRITER)
                 add(MediaStore.Audio.Media.DISC_NUMBER)
                 add(MediaStore.Audio.Media.AUTHOR)
+                add(MediaStore.Audio.Media.IS_FAVORITE)
             }
         }.toTypedArray()
 
@@ -104,7 +115,7 @@ internal object Reader {
      * without much hassle.
      */
     @OptIn(UnstableApi::class)
-    fun readFromMediaStore(
+    suspend fun readFromMediaStore(
         context: Context,
         minSongLengthSeconds: Long = 0,
         blackListSet: Set<String> = setOf(),
@@ -160,13 +171,17 @@ internal object Reader {
         val genreMap = if (shouldLoadGenres) hashMapOf<String?, Genre>() else null
         val dateMap = if (shouldLoadDates) hashMapOf<Int?, Date>() else null
         val idMap = if (shouldLoadIdMap) hashMapOf<Long, MediaItem>() else null
-        val cursor = context.contentResolver.query(
+        val pathMap = if (shouldLoadIdMap) hashMapOf<String, MediaItem>() else null
+        val hasVolume = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+	        MediaStore.getExternalVolumeNames(context).contains(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+        } else true
+        val cursor = if (hasVolume) context.contentResolver.query(
             MediaStore.Audio.Media.EXTERNAL_CONTENT_URI,
             projection,
             selection,
             null,
             MediaStore.Audio.Media.TITLE + " COLLATE UNICODE ASC",
-        )
+        ) else null
         val defaultZone by lazy { if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             ZoneId.systemDefault()
         } else null }
@@ -199,21 +214,34 @@ internal object Reader {
                 it.getColumnIndexOrThrow(MediaStore.Audio.Media.WRITER) else null
             val authorColumn = if (hasImprovedMediaStore())
                 it.getColumnIndexOrThrow(MediaStore.Audio.Media.AUTHOR) else null
+            val favoriteColumn = if (hasImprovedMediaStore())
+                it.getColumnIndexOrThrow(MediaStore.Audio.Media.IS_FAVORITE) else null
             val durationColumn = it.getColumnIndexOrThrow(MediaStore.Audio.Media.DURATION)
             val addDateColumn = it.getColumnIndexOrThrow(MediaStore.Audio.Media.DATE_ADDED)
             val modifiedDateColumn = it.getColumnIndexOrThrow(MediaStore.Audio.Media.DATE_MODIFIED)
 
             while (it.moveToNext()) {
                 val path = it.getStringOrNullIfThrow(pathColumn)
-                val duration = it.getLongOrNullIfThrow(durationColumn)
+                val duration = it.getLongOrNullIfThrow(durationColumn)?.let { if (it >= 0) it else null }
                 val pathFile = path?.let { it1 -> File(it1) }
                 val parent = pathFile?.parentFile
                 val fldPath = parent?.absolutePath
+                var isBlacklisted = false
+                if (blackListSet.isNotEmpty()) {
+                    var f = pathFile
+                    while (f != null) {
+                        if (blackListSet.contains(f.absolutePath)) {
+                            isBlacklisted = true
+                            break
+                        }
+                        f = f.parentFile
+                    }
+                }
                 val skip = (duration != null && duration != 0L &&
                         duration < minSongLengthSeconds * 1000) || (fldPath == null
-                        || blackListSet.contains(fldPath))
+                        || isBlacklisted)
                 // We need to add blacklisted songs to idMap as they can be referenced by playlist
-                if (skip && idMap == null) continue
+                if (skip && idMap == null && pathMap == null) continue
                 val id = it.getLongOrNullIfThrow(idColumn)!!
                 val title = it.getStringOrNullIfThrow(titleColumn)!!
                 val artist: String?
@@ -237,6 +265,9 @@ internal object Reader {
                 val writer = writerColumn?.let { col -> it.getStringOrNullIfThrow(col) }
                 val author = authorColumn?.let { col -> it.getStringOrNullIfThrow(col) }
                 val genre = genreColumn?.let { col -> it.getStringOrNullIfThrow(col) }
+                val favorite = favoriteColumn?.let { col -> it.getIntOrNullIfThrow(col) }.let {
+                    when (it) { 1 -> true; 0 -> false; else -> null }
+                }
                 val addDate = it.getLongOrNullIfThrow(addDateColumn)
                 val modifiedDate = it.getLongOrNullIfThrow(modifiedDateColumn)
                 val dateTakenParsed = if (hasImprovedMediaStore()) {
@@ -314,6 +345,7 @@ internal object Reader {
                             .setRecordingMonth(dateTakenMonth)
                             .setRecordingYear(dateTakenYear)
                             .setReleaseYear(year)
+                            .setUserRating(if (favorite != null) HeartRating(favorite) else HeartRating())
                             .setExtras(Bundle().apply {
                                 if (artistId != null) {
                                     putLong(EXTRA_ARTIST_ID, artistId)
@@ -321,6 +353,11 @@ internal object Reader {
                                 if (albumId != null) {
                                     putLong(EXTRA_ALBUM_ID, albumId)
                                 }
+                                // EXTRA_ALBUM_YEAR assigned below
+                                // TODO: is albumYear truly a good property of a song? it creates
+                                //  a cyclic dependency between albums derived from songs, and song
+                                //  metadata derived from album. maybe users of this should just
+                                //  query the album list instead and fetch album year from there.
                                 putString(EXTRA_AUTHOR, author)
                                 if (addDate != null) {
                                     putLong(EXTRA_ADD_DATE, addDate)
@@ -334,6 +371,8 @@ internal object Reader {
                     ).build()
                 // Build our metadata maps/lists.
                 idMap?.put(id, song)
+                if (path != null)
+                    pathMap?.put(path, song)
                 // Now that the song can be found by playlists, do NOT register other metadata.
                 if (skip) continue
                 songs.add(song)
@@ -351,6 +390,8 @@ internal object Reader {
                         null,
                         null,
                         cover,
+                        null,
+                        null,
                         null,
                         mutableListOf()
                     )
@@ -373,7 +414,13 @@ internal object Reader {
                 }
                 if (shouldLoadFolders) {
                     handleShallowMediaItem(song, albumId, parent.name, shallowRoot!!)
-                    folders!!.add(fldPath)
+                    var tmpPath = parent
+                    while (tmpPath != null) {
+                        folders!!.add(tmpPath.absolutePath)
+                        tmpPath = tmpPath.parentFile
+                        if (tmpPath.absolutePath == "/storage/emulated" || tmpPath.absolutePath == "/storage")
+                            tmpPath = null // lets not allow to blacklist more than entire volumes
+                    }
                 }
             }
         }
@@ -382,13 +429,20 @@ internal object Reader {
         val albumList = albumMap?.values?.onEach {
             if (it.albumArtistId != null || it.albumArtist != null)
                 throw IllegalStateException("code bug? failed: it.albumArtistId != null || it.albumArtist != null")
-            val artistFound = findBestAlbumArtist(it.songList, artistCacheMap!!)
+            val artistFound = findBestAlbumArtist(it.songList)
             it.albumArtist = artistFound?.first
-            it.albumArtistId = artistFound?.second
+            it.albumArtistId = artistFound?.second ?: artistCacheMap?.get(it.albumArtist)
+                    ?: "nonMediaStoreArtist:${it.albumArtist}".hashCode().toLong()
             it.albumYear = it.songList.mapNotNull { it.mediaMetadata.releaseYear }.maxOrNull()
-            (albumArtistMap?.getOrPut(it.albumArtistId) {
+            if (it.albumYear != null)
+                it.songList.forEach { item -> item.mediaMetadata.extras!!.putLong(EXTRA_ALBUM_YEAR, it.albumYear!!.toLong()) }
+            it.albumAddDate = it.songList.mapNotNull { it.mediaMetadata.addDate }.minOrNull()
+            it.albumModifiedDate = it.songList.mapNotNull { it.mediaMetadata.modifiedDate }.maxOrNull()
+            val albumArtist = albumArtistMap?.getOrPut(it.albumArtistId) {
                 Artist(it.albumArtistId, it.albumArtist, mutableListOf(), mutableListOf())
-            }?.albumList as MutableList?)?.add(it)
+            }
+            (albumArtist?.albumList as MutableList?)?.add(it)
+            (albumArtist?.songList as MutableList?)?.addAll(it.songList)
             (artistMap?.get(it.albumArtistId)?.albumList as MutableList?)?.add(it)
             // coverCache == null if !useEnhancedCoverReading
             coverCache?.get(it.id)?.let { p ->
@@ -402,12 +456,36 @@ internal object Reader {
                 }
             }
         }?.toList<Album>()
+        if (!albumList.isNullOrEmpty()) {
+            supervisorScope {
+                for (i in 0..(albumList.size / 100)) {
+                    launch {
+                        for (j in (i * 100)..<min(i * 100 + 100, albumList.size)) {
+                            (albumList[j].songList as MutableList).sortBy {
+                                (it.mediaMetadata.discNumber ?: 0) * 1000 +
+                                        (it.mediaMetadata.trackNumber ?: 0)
+                            }
+                        }
+                    }
+                }
+            }
+        }
         val artistList = artistMap?.values?.toList()
         val albumArtistList = albumArtistMap?.values?.toList()
         val genreList = genreMap?.values?.toList()
         val dateList = dateMap?.values?.toList()
 
-        folders?.addAll(blackListSet)
+        if (folders != null) {
+            for (blacklistedFolder in blackListSet) {
+                var tmpPath: File? = File(blacklistedFolder)
+                while (tmpPath != null) {
+                    folders.add(tmpPath.absolutePath)
+                    tmpPath = tmpPath.parentFile
+                    if (tmpPath.absolutePath == "/storage/emulated" || tmpPath.absolutePath == "/storage")
+                        tmpPath = null // lets not allow to blacklist more than entire volumes
+                }
+            }
+        }
 
         return ReaderResult(
             songs,
@@ -417,6 +495,7 @@ internal object Reader {
             genreList,
             dateList,
             idMap,
+            pathMap,
             root,
             shallowRoot,
             folders
@@ -430,35 +509,73 @@ internal object Reader {
             @Suppress("DEPRECATION")
             MediaStore.Audio.Playlists.EXTERNAL_CONTENT_URI, arrayOf(
                 @Suppress("DEPRECATION") MediaStore.Audio.Playlists._ID,
-                @Suppress("DEPRECATION") MediaStore.Audio.Playlists.NAME
+                @Suppress("DEPRECATION") MediaStore.Audio.Playlists.NAME,
+                @Suppress("DEPRECATION") MediaStore.Audio.Playlists.DATA,
+                @Suppress("DEPRECATION") MediaStore.Audio.Playlists.DATE_ADDED,
+                @Suppress("DEPRECATION") MediaStore.Audio.Playlists.DATE_MODIFIED
             ), null, null, null
         )?.use {
             val playlistIdColumn = it.getColumnIndexOrThrow(
                 @Suppress("DEPRECATION") MediaStore.Audio.Playlists._ID
             )
+            val playlistPathColumn = it.getColumnIndexOrThrow(
+                @Suppress("DEPRECATION") MediaStore.Audio.Playlists.DATA
+            )
             val playlistNameColumn = it.getColumnIndexOrThrow(
                 @Suppress("DEPRECATION") MediaStore.Audio.Playlists.NAME
+            )
+            val playlistDateAddedColumn = it.getColumnIndexOrThrow(
+                @Suppress("DEPRECATION") MediaStore.Audio.Playlists.DATE_ADDED
+            )
+            val playlistDateModifiedColumn = it.getColumnIndexOrThrow(
+                @Suppress("DEPRECATION") MediaStore.Audio.Playlists.DATE_MODIFIED
             )
             while (it.moveToNext()) {
                 val playlistId = it.getLong(playlistIdColumn)
                 val playlistName = it.getString(playlistNameColumn)?.ifEmpty { null }
-                val content = mutableListOf<Long>()
+                val playlistPath = it.getString(playlistPathColumn)?.ifEmpty { null }?.let { p -> File(p) }
+                val playlistDateAdded = it.getLongOrNullIfThrow(playlistDateAddedColumn)
+                val playlistDateModified = it.getLongOrNullIfThrow(playlistDateModifiedColumn)
+                val content = mutableListOf<Long?>()
                 context.contentResolver.query(
                     @Suppress("DEPRECATION") MediaStore.Audio
                         .Playlists.Members.getContentUri("external", playlistId), arrayOf(
                         @Suppress("DEPRECATION") MediaStore.Audio.Playlists.Members.AUDIO_ID,
+                        @Suppress("DEPRECATION") MediaStore.Audio.Playlists.Members.PLAY_ORDER,
                     ), null, null, @Suppress("DEPRECATION")
                     MediaStore.Audio.Playlists.Members.PLAY_ORDER + " ASC"
                 )?.use { cursor ->
                     val column = cursor.getColumnIndexOrThrow(
                         @Suppress("DEPRECATION") MediaStore.Audio.Playlists.Members.AUDIO_ID
                     )
+                    val column2 = cursor.getColumnIndexOrThrow(
+                        @Suppress("DEPRECATION") MediaStore.Audio.Playlists.Members.PLAY_ORDER
+                    )
+                    var first: Long? = null
                     while (cursor.moveToNext()) {
+                        val last = first
+                        first = cursor.getLong(column2)
+                        while (last != null && first + 1 < last) {
+                            content.add(null)
+                            first++
+                        }
                         foundPlaylistContent = true
                         content.add(cursor.getLong(column))
                     }
                 }
-                playlists.add(RawPlaylist(playlistId, playlistName, content))
+                val paths = try {
+                    playlistPath?.let { p -> PlaylistSerializer.read(p).map { if (it.isFile) it else null } }
+                } catch (_: PlaylistSerializer.UnsupportedPlaylistFormatException) {
+                    null
+                } catch (e: IOException) {
+                    Log.w("Reader", "failed to read playlist $playlistPath", e)
+                    null
+                }
+                if (paths != null && content.size > paths.size) {
+                    throw IllegalStateException("playlist $playlistName failed to parse: $content, $paths")
+                }
+                playlists.add(RawPlaylist(playlistId, playlistName, playlistPath,
+                    playlistDateAdded, playlistDateModified, content, paths))
             }
         }
         return Pair(playlists, foundPlaylistContent)

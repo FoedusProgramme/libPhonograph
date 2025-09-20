@@ -3,6 +3,7 @@ package uk.akane.libphonograph.reader
 import android.content.Context
 import android.provider.MediaStore
 import androidx.media3.common.MediaItem
+import kotlinx.coroutines.CoroutineName
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -16,21 +17,27 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.mapLatest
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.shareIn
 import kotlinx.coroutines.launch
-import uk.akane.libphonograph.collectOtherFlowWhenBeingCollected
+import uk.akane.libphonograph.utils.flows.Invalidation
+import uk.akane.libphonograph.utils.flows.PauseManagingSharedFlow.Companion.sharePauseableIn
+import uk.akane.libphonograph.utils.flows.conflateAndBlockWhenPaused
+import uk.akane.libphonograph.utils.flows.provideReplayCacheInvalidationManager
+import uk.akane.libphonograph.utils.flows.repeatUntilDoneWhenUnpaused
+import uk.akane.libphonograph.utils.flows.requireReplayCacheInvalidationManager
 import uk.akane.libphonograph.contentObserverVersioningFlow
+import uk.akane.libphonograph.dynamicitem.Favorite
 import uk.akane.libphonograph.dynamicitem.RecentlyAdded
-import uk.akane.libphonograph.flowWhileShared
 import uk.akane.libphonograph.hasAudioPermission
 import uk.akane.libphonograph.items.Album
 import uk.akane.libphonograph.items.Artist
 import uk.akane.libphonograph.items.Date
 import uk.akane.libphonograph.items.FileNode
+import uk.akane.libphonograph.items.Flags
 import uk.akane.libphonograph.items.Genre
-import uk.akane.libphonograph.sharedFlow
 
 /**
  * SimpleReader reimplementation using flows with focus on efficiency.
@@ -50,11 +57,12 @@ class FlowReader(
     private var awaitingRefresh = false
     var hadFirstRefresh = true
         private set
-    private val scope = CoroutineScope(Dispatchers.IO)
+    private val scope = CoroutineScope(Dispatchers.IO + CoroutineName("FlowReader"))
     private val finishRefreshTrigger = MutableSharedFlow<Unit>(replay = 0)
     private val manualRefreshTrigger = MutableSharedFlow<Unit>(replay = 1)
     init {
-        manualRefreshTrigger.tryEmit(Unit)
+        if (!manualRefreshTrigger.tryEmit(Unit))
+            throw IllegalStateException()
     }
     // Start observing as soon as class gets instantiated. ContentObservers are cheap, and more
     // importantly, this allows us to skip the expensive Reader call if nothing changed while we
@@ -67,11 +75,10 @@ class FlowReader(
         context, scope, MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, true
     ).shareIn(scope, Eagerly, replay = 1)
     // These expensive Reader calls are only done if we have someone (UI) observing the result AND
-    // something changed. The flowWhileShared() mechanism allows us to skip any unnecessary work.
-    private val rawPlaylistFlow = sharedFlow(scope, replay = 1) { subscriptionCount ->
-        rawPlaylistVersionFlow
-            .flowWhileShared(subscriptionCount, WhileSubscribed())
-            .distinctUntilChanged()
+    // something changed. The PauseableFlows mechanism allows us to skip any unnecessary work.
+    private val rawPlaylistFlow = rawPlaylistVersionFlow
+            .onEach { requireReplayCacheInvalidationManager().invalidate() }
+            .conflateAndBlockWhenPaused()
             .flatMapLatest {
                 manualRefreshTrigger.mapLatest { _ ->
                     if (context.hasAudioPermission())
@@ -79,63 +86,54 @@ class FlowReader(
                     else emptyList()
                 }
             }
-    }
-    private val readerFlow: Flow<ReaderResult> = sharedFlow(scope, replay = 1) { subscriptionCount ->
+            .provideReplayCacheInvalidationManager(copyDownstream = Invalidation.Optional)
+            .sharePauseableIn(scope, WhileSubscribed(20000), WhileSubscribed(2000), replay = 1)
+    private val readerFlow: Flow<ReaderResult> =
         shouldIncludeExtraFormatFlow.distinctUntilChanged().flatMapLatest { shouldIncludeExtraFormat ->
-            shouldUseEnhancedCoverReadingFlow.distinctUntilChanged().flatMapLatest { shouldUseEnhancedCoverReading ->
-                minSongLengthSecondsFlow.distinctUntilChanged().flatMapLatest { minSongLengthSeconds ->
-                    blackListSetFlow.distinctUntilChanged().flatMapLatest { blackListSet ->
-                        mediaVersionFlow
-                            .flowWhileShared(subscriptionCount, WhileSubscribed())
-                            .distinctUntilChanged()
-                            .flatMapLatest {
-                                // manual refresh may for whatever reason run in background
-                                // but all others shouldn't trigger background runs
-                                manualRefreshTrigger.mapLatest { _ ->
-                                    if (context.hasAudioPermission())
-                                        Reader.readFromMediaStore(
-                                            context,
-                                            minSongLengthSeconds,
-                                            blackListSet,
-                                            shouldUseEnhancedCoverReading,
-                                            shouldIncludeExtraFormat,
-                                            coverStubUri = coverStubUri
-                                        )
-                                    else ReaderResult.emptyReaderResult()
+            shouldUseEnhancedCoverReadingFlow.distinctUntilChanged()
+                .flatMapLatest { shouldUseEnhancedCoverReading ->
+                    minSongLengthSecondsFlow.distinctUntilChanged().flatMapLatest { minSongLengthSeconds ->
+                        blackListSetFlow.distinctUntilChanged().flatMapLatest { blackListSet ->
+                            mediaVersionFlow
+                                .onEach { requireReplayCacheInvalidationManager().invalidate() }
+                                .conflateAndBlockWhenPaused()
+                                .flatMapLatest {
+                                    // manual refresh may for whatever reason run in background
+                                    // but all others shouldn't trigger background runs
+                                    manualRefreshTrigger.mapLatest { _ ->
+                                        repeatUntilDoneWhenUnpaused {
+                                            // TODO repeatUntilDoneWhenUnpaused makes no sense with non-cancelable
+                                            //  function, make it cancelable
+                                            if (context.hasAudioPermission())
+                                                Reader.readFromMediaStore(
+                                                    context,
+                                                    minSongLengthSeconds,
+                                                    blackListSet,
+                                                    shouldUseEnhancedCoverReading,
+                                                    shouldIncludeExtraFormat,
+                                                    coverStubUri = coverStubUri
+                                                )
+                                            else ReaderResult.emptyReaderResult()
+                                        }
+                                    }
                                 }
-                            }
+                        }
                     }
                 }
-            }
-        }.onEach {
-            // These manual emit()s and collectOtherFlowWhenBeingCollected() have a significant
-            // advantage over map(): the individual flow's replay cache always contains the latest
-            // data we have even if nobody is collecting it. As we generate that data anyway, we
-            // should make sure to always use the latest data we have.
-            // We can do all these null assertions as we never pass shouldLoad*=false into Reader.
-            songListFlowMutable.emit(it.songList)
-            albumListFlowMutable.emit(it.albumList!!)
-            albumArtistListFlowMutable.emit(it.albumArtistList!!)
-            artistListFlowMutable.emit(it.artistList!!)
-            genreListFlowMutable.emit(it.genreList!!)
-            dateListFlowMutable.emit(it.dateList!!)
-            idMapFlowMutable.emit(it.idMap!!)
-            folderStructureFlowMutable.emit(it.folderStructure!!)
-            shallowFolderFlowMutable.emit(it.shallowFolder!!)
-            foldersFlowMutable.emit(it.folders!!)
-            finishRefreshTrigger.emit(Unit)
-            awaitingRefresh = true
-            hadFirstRefresh = true
         }
-    }
-    private val idMapFlowMutable = MutableSharedFlow<Map<Long, MediaItem>>(replay = 1)
-        .collectOtherFlowWhenBeingCollected(scope, readerFlow)
-    val idMapFlow: Flow<Map<Long, MediaItem>> = idMapFlowMutable
-    private val songListFlowMutable = MutableSharedFlow<List<MediaItem>>(replay = 1)
-        .collectOtherFlowWhenBeingCollected(scope, readerFlow)
-    val songListFlow: Flow<List<MediaItem>> = songListFlowMutable
+            .onEach {
+                finishRefreshTrigger.emit(Unit)
+                awaitingRefresh = true
+                hadFirstRefresh = true
+            }
+            .provideReplayCacheInvalidationManager(copyDownstream = Invalidation.Optional)
+            .sharePauseableIn(scope, WhileSubscribed(20000), WhileSubscribed(2000), replay = 1)
+    val idMapFlow: Flow<Map<Long, MediaItem>> = readerFlow.map { it.idMap!! }
+    private val idPathMapFlow = readerFlow.map { it.idMap!! to it.pathMap!! }
+    val songListFlow: Flow<List<MediaItem>> = readerFlow.map { it.songList }
     private val recentlyAddedFlow = recentlyAddedFilterSecondFlow.distinctUntilChanged()
-        .combine(songListFlowMutable) { recentlyAddedFilterSecond, songList ->
+        .onEach { requireReplayCacheInvalidationManager().invalidate() }
+        .combine(songListFlow) { recentlyAddedFilterSecond, songList ->
             if (recentlyAddedFilterSecond != null)
                 RecentlyAdded(
                     (System.currentTimeMillis() / 1000L) - recentlyAddedFilterSecond,
@@ -144,36 +142,29 @@ class FlowReader(
             else
                 null
         }
-    private val mappedPlaylistsFlow = idMapFlowMutable.combine(rawPlaylistFlow) { idMap, rawPlaylists ->
-        rawPlaylists.map { it.toPlaylist(idMap) }
+        .provideReplayCacheInvalidationManager(copyDownstream = Invalidation.Optional)
+        .sharePauseableIn(scope, WhileSubscribed(20000), WhileSubscribed(2000), replay = 1)
+    private val favoriteFlow = songListFlow.map { songList ->
+            Favorite(songList)
+        }
+        .provideReplayCacheInvalidationManager(copyDownstream = Invalidation.Optional)
+        .sharePauseableIn(scope, WhileSubscribed(20000), WhileSubscribed(2000), replay = 1)
+    private val mappedPlaylistsFlow = idPathMapFlow.combine(rawPlaylistFlow) { idPathMap, rawPlaylists ->
+        rawPlaylists.map { it.toPlaylist(idPathMap.first, idPathMap.second) }
     }
-    private val albumListFlowMutable = MutableSharedFlow<List<Album>>(replay = 1)
-        .collectOtherFlowWhenBeingCollected(scope, readerFlow)
-    private val albumArtistListFlowMutable = MutableSharedFlow<List<Artist>>(replay = 1)
-        .collectOtherFlowWhenBeingCollected(scope, readerFlow)
-    private val artistListFlowMutable = MutableSharedFlow<List<Artist>>(replay = 1)
-        .collectOtherFlowWhenBeingCollected(scope, readerFlow)
-    private val genreListFlowMutable = MutableSharedFlow<List<Genre>>(replay = 1)
-        .collectOtherFlowWhenBeingCollected(scope, readerFlow)
-    private val dateListFlowMutable = MutableSharedFlow<List<Date>>(replay = 1)
-        .collectOtherFlowWhenBeingCollected(scope, readerFlow)
-    val albumListFlow: Flow<List<Album>> = albumListFlowMutable
-    val albumArtistListFlow: Flow<List<Artist>> = albumArtistListFlowMutable
-    val artistListFlow: Flow<List<Artist>> = artistListFlowMutable
-    val genreListFlow: Flow<List<Genre>> = genreListFlowMutable
-    val dateListFlow: Flow<List<Date>> = dateListFlowMutable
-    val playlistListFlow = mappedPlaylistsFlow.combine(recentlyAddedFlow) { mappedPlaylists, recentlyAdded ->
-        if (recentlyAdded != null) mappedPlaylists + recentlyAdded else mappedPlaylists
-    }.shareIn(scope, WhileSubscribed(), replay = 1)
-    private val folderStructureFlowMutable = MutableSharedFlow<FileNode>(replay = 1)
-        .collectOtherFlowWhenBeingCollected(scope, readerFlow)
-    private val shallowFolderFlowMutable = MutableSharedFlow<FileNode>(replay = 1)
-        .collectOtherFlowWhenBeingCollected(scope, readerFlow)
-    private val foldersFlowMutable = MutableSharedFlow<Set<String>>(replay = 1)
-        .collectOtherFlowWhenBeingCollected(scope, readerFlow)
-    val folderStructureFlow: Flow<FileNode> = folderStructureFlowMutable
-    val shallowFolderFlow: Flow<FileNode> = shallowFolderFlowMutable
-    val foldersFlow: Flow<Set<String>> = foldersFlowMutable
+    val albumListFlow: Flow<List<Album>> = readerFlow.map { it.albumList!! }
+    val albumArtistListFlow: Flow<List<Artist>> = readerFlow.map { it.albumArtistList!! }
+    val artistListFlow: Flow<List<Artist>> = readerFlow.map { it.artistList!! }
+    val genreListFlow: Flow<List<Genre>> = readerFlow.map { it.genreList!! }
+    val dateListFlow: Flow<List<Date>> = readerFlow.map { it.dateList!! }
+    val playlistListFlow = combine(mappedPlaylistsFlow, recentlyAddedFlow, favoriteFlow)
+    { mappedPlaylists, recentlyAdded, favorite ->
+        val base = if (Flags.FAVORITE_SONGS) mappedPlaylists + favorite else mappedPlaylists
+        if (recentlyAdded != null) base + recentlyAdded else base
+    }
+    val folderStructureFlow: Flow<FileNode> = readerFlow.map { it.folderStructure!! }
+    val shallowFolderFlow: Flow<FileNode> = readerFlow.map { it.shallowFolder!! }
+    val foldersFlow: Flow<Set<String>> = readerFlow.map { it.folders!! }
 
     /**
      * If the library hasn't been loaded yet, forces a load of the library. Otherwise forces a

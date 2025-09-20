@@ -4,7 +4,7 @@ import androidx.media3.common.MediaItem
 import uk.akane.libphonograph.items.Playlist
 import uk.akane.libphonograph.items.addDate
 
-class RecentlyAdded(minAddDate: Long, songList: List<MediaItem>) : Playlist(-1, null) {
+class RecentlyAdded(minAddDate: Long, songList: List<MediaItem>) : Playlist(null, null, null, null, null, false) {
     private val rawList: List<MediaItem> = songList.sortedByDescending {
         it.mediaMetadata.addDate ?: -1 }
     private var filteredList = filterList(minAddDate)

@@ -1,6 +1,9 @@
 package uk.akane.libphonograph.reader
 
 import android.content.Context
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import uk.akane.libphonograph.dynamicitem.RecentlyAdded
 
 object SimpleReader {
@@ -14,9 +17,15 @@ object SimpleReader {
         coverStubUri: String? = null
     ): SimpleReaderResult {
         val (playlists, foundPlaylistContent) = Reader.fetchPlaylists(context)
-        val result = Reader.readFromMediaStore(context, minSongLengthSeconds, blackListSet,
-            shouldUseEnhancedCoverReading, shouldIncludeExtraFormat,
-            shouldLoadIdMap = foundPlaylistContent, coverStubUri = coverStubUri)
+        val result = runBlocking {
+            withContext(Dispatchers.Default) {
+                Reader.readFromMediaStore(
+                    context, minSongLengthSeconds, blackListSet,
+                    shouldUseEnhancedCoverReading, shouldIncludeExtraFormat,
+                    shouldLoadIdMap = foundPlaylistContent, coverStubUri = coverStubUri
+                )
+            }
+        }
         // We can null assert because we never pass shouldLoad*=false into Reader
         return SimpleReaderResult(
             result.songList,
@@ -25,7 +34,7 @@ object SimpleReader {
             result.artistList!!,
             result.genreList!!,
             result.dateList!!,
-            playlists.map { it.toPlaylist(result.idMap) }.let {
+            playlists.map { it.toPlaylist(result.idMap, result.pathMap) }.let {
                 if (recentlyAddedFilterSecond != null)
                     it + RecentlyAdded(
                         (System.currentTimeMillis() / 1000L) - recentlyAddedFilterSecond,

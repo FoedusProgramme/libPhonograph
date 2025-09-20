@@ -17,6 +17,7 @@ data class ReaderResult(
     val genreList: List<Genre>?,
     val dateList: List<Date>?,
     val idMap: Map<Long, MediaItem>?, // used for converting RawPlaylist to Playlist
+    val pathMap: Map<String, MediaItem>?,
     val folderStructure: FileNode?,
     val shallowFolder: FileNode?,
     val folders: Set<String>?
@@ -24,7 +25,7 @@ data class ReaderResult(
     companion object {
         fun emptyReaderResult() = ReaderResult(
             listOf(), listOf(), listOf(), listOf(), listOf(), listOf(),
-            mapOf(),
+            mapOf(), mapOf(),
             EmptyFileNode, EmptyFileNode,
             setOf())
     }
