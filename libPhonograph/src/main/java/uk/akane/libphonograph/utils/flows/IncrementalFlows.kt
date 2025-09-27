@@ -23,7 +23,6 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import uk.akane.libphonograph.utils.flows.PauseManagingSharedFlow.Companion.sharePauseableIn
 import uk.akane.libphonograph.Constants
 import uk.akane.libphonograph.getFile
 import uk.akane.libphonograph.items.albumId
@@ -31,6 +30,7 @@ import uk.akane.libphonograph.items.artistId
 import uk.akane.libphonograph.toUriCompat
 import uk.akane.libphonograph.utils.MiscUtils
 import uk.akane.libphonograph.utils.MiscUtils.findBestCover
+import uk.akane.libphonograph.utils.flows.PauseManagingSharedFlow.Companion.sharePauseableIn
 import java.io.File
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.abs
@@ -233,7 +233,7 @@ inline fun <T, K> Iterable<T>.groupByIndexed(keySelector: (Int, T) -> K): Map<K,
     val destination = LinkedHashMap<K, ArrayList<T>>()
     forEachIndexed { index, element ->
         val key = keySelector(index, element)
-        val list = destination.getOrPut(key) { ArrayList<T>() }
+        val list = destination.getOrPut(key) { ArrayList() }
         list.add(element)
     }
     return destination
@@ -244,30 +244,30 @@ inline fun <T, R> Flow<IncrementalList<T>>.groupByIncremental(
 ): Flow<IncrementalMap<R, IncrementalList<T>>> = flow {
     var keyCache: ArrayList<R>? = null
     val groupCache = HashMap<R, IncrementalList<T>>()
-    collect {
+    collect { list ->
         when {
-            it is IncrementalList.Begin || keyCache == null -> {
+            list is IncrementalList.Begin || keyCache == null -> {
                 groupCache.clear()
                 if (keyCache != null)
                     keyCache!!.clear()
                 else
                     keyCache = ArrayList()
-                keyCache.addAll(it.after.map { getKey(it) })
-                groupCache.putAll(it.after.groupByIndexed { i, _ -> keyCache[i] }
+                keyCache.addAll(list.after.map { getKey(it) })
+                groupCache.putAll(list.after.groupByIndexed { i, _ -> keyCache[i] }
                     .mapValues { IncrementalList.Begin(it.value) })
                 emit(IncrementalMap.Begin(groupCache))
             }
-            it is IncrementalList.Insert -> {
-                for (i in it.pos..<it.pos + it.count) {
-                    val item = it.after[i]
+            list is IncrementalList.Insert -> {
+                for (i in list.pos..<list.pos + list.count) {
+                    val item = list.after[i]
                     val key = getKey(item)
                     keyCache.add(i, key)
                     val group = groupCache[key]
                     if (group != null) {
                         var totalStart = 0
-                        for (j in it.pos - 1 downTo 0) {
+                        for (j in list.pos - 1 downTo 0) {
                             if (keyCache[j] == key) {// TODO optimize equals?
-                                totalStart = group.after.indexOf(it.after[j])
+                                totalStart = group.after.indexOf(list.after[j])
                                 break
                             }
                         }
@@ -281,24 +281,24 @@ inline fun <T, R> Flow<IncrementalList<T>>.groupByIncremental(
                     }
                 }
             }
-            it is IncrementalList.Move -> {
+            list is IncrementalList.Move -> {
                 var keys = mutableListOf<R>()
-                repeat(it.count) { _ ->
-                    keys.add(keyCache.removeAt(it.pos))
+                repeat(list.count) { _ ->
+                    keys.add(keyCache.removeAt(list.pos))
                 }
-                for (i in it.outPos..<it.outPos+it.count) {
-                    keyCache.add(i, keys[i - it.outPos])
+                for (i in list.outPos..<list.outPos+list.count) {
+                    keyCache.add(i, keys[i - list.outPos])
                 }
-                for (i in it.pos..<it.pos + it.count) {
-                    val outPos = it.outPos - it.pos + i
-                    val item = it.after[outPos]
-                    val key = keys[i - it.pos]
+                for (i in list.pos..<list.pos + list.count) {
+                    val outPos = list.outPos - list.pos + i
+                    val item = list.after[outPos]
+                    val key = keys[i - list.pos]
                     val group = groupCache.getValue(key)
                     val oldInnerPos = group.after.indexOf(item)
                     var totalStart = 0
                     for (j in outPos - 1 downTo 0) {
                         if (keyCache[j] == key) {// TODO optimize equals?
-                            totalStart = group.after.indexOf(it.after[j])
+                            totalStart = group.after.indexOf(list.after[j])
                             break
                         }
                     }
@@ -308,15 +308,15 @@ inline fun <T, R> Flow<IncrementalList<T>>.groupByIncremental(
                     emit(IncrementalMap.Update(key, groupCache.toMap()))
                 }
             }
-            it is IncrementalList.Remove -> {
-                repeat(it.count) { _ ->
-                    val key = keyCache.removeAt(it.pos)
+            list is IncrementalList.Remove -> {
+                repeat(list.count) { _ ->
+                    val key = keyCache.removeAt(list.pos)
                     val group = groupCache.getValue(key)
                     if (group.after.size > 1) {
                         var totalStart = 0
-                        for (j in it.pos - 1 downTo 0) {
+                        for (j in list.pos - 1 downTo 0) {
                             if (keyCache[j] == key) {// TODO optimize equals?
-                                totalStart = group.after.indexOf(it.after[j])
+                                totalStart = group.after.indexOf(list.after[j])
                                 break
                             }
                         }
@@ -330,17 +330,17 @@ inline fun <T, R> Flow<IncrementalList<T>>.groupByIncremental(
                     }
                 }
             }
-            it is IncrementalList.Update -> {
-                for (i in it.pos..<it.pos + it.count) {
-                    val item = it.after[i]
+            list is IncrementalList.Update -> {
+                for (i in list.pos..<list.pos + list.count) {
+                    val item = list.after[i]
                     val newKey = getKey(item)
                     val oldKey = keyCache[i]
                     val oldGroup = groupCache.getValue(oldKey)
                     if (newKey == oldKey) {
                         var totalStart = 0
-                        for (j in it.pos - 1 downTo 0) {
+                        for (j in list.pos - 1 downTo 0) {
                             if (keyCache[j] == oldKey) {// TODO optimize equals?
-                                totalStart = oldGroup.after.indexOf(it.after[j])
+                                totalStart = oldGroup.after.indexOf(list.after[j])
                                 break
                             }
                         }
@@ -353,9 +353,9 @@ inline fun <T, R> Flow<IncrementalList<T>>.groupByIncremental(
                     keyCache[i] = newKey
                     if (oldGroup.after.size > 1) {
                         var totalStart = 0
-                        for (j in it.pos - 1 downTo 0) {
+                        for (j in list.pos - 1 downTo 0) {
                             if (keyCache[j] == oldKey) {// TODO optimize equals?
-                                totalStart = oldGroup.after.indexOf(it.after[j])
+                                totalStart = oldGroup.after.indexOf(list.after[j])
                                 break
                             }
                         }
@@ -370,9 +370,9 @@ inline fun <T, R> Flow<IncrementalList<T>>.groupByIncremental(
                     val group = groupCache[newKey]
                     if (group != null) {
                         var totalStart = 0
-                        for (j in it.pos - 1 downTo 0) {
+                        for (j in list.pos - 1 downTo 0) {
                             if (keyCache[j] == newKey) {// TODO optimize equals?
-                                totalStart = group.after.indexOf(it.after[j])
+                                totalStart = group.after.indexOf(list.after[j])
                                 break
                             }
                         }
@@ -508,44 +508,44 @@ inline fun <T, R> Flow<IncrementalMap<T, R>>.filterIncremental(
     crossinline predicate: (T, R) -> Boolean
 ): Flow<IncrementalMap<T, R>> = flow {
     var filterCache: HashMap<T, Boolean>? = null
-    collect {
+    collect { map ->
         when {
-            it is IncrementalMap.Begin || filterCache == null -> {
+            map is IncrementalMap.Begin || filterCache == null -> {
                 if (filterCache != null)
                     filterCache!!.clear()
                 else
                     filterCache = HashMap()
-                filterCache.putAll(it.after.mapValues { predicate(it.key, it.value) })
-                emit(IncrementalMap.Begin(it.after.filter { filterCache.getValue(it.key) }))
+                filterCache.putAll(map.after.mapValues { predicate(it.key, it.value) })
+                emit(IncrementalMap.Begin(map.after.filter { filterCache.getValue(it.key) }))
             }
-            it is IncrementalMap.Insert -> {
-                val filtered = predicate(it.key, @Suppress("UNCHECKED_CAST") (it.after[it.key] as R))
-                filterCache[it.key] = filtered
+            map is IncrementalMap.Insert -> {
+                val filtered = predicate(map.key, @Suppress("UNCHECKED_CAST") (map.after[map.key] as R))
+                filterCache[map.key] = filtered
                 if (!filtered)
-                    emit(IncrementalMap.Insert(it.key, it.after.filter { filterCache.getValue(it.key) }))
+                    emit(IncrementalMap.Insert(map.key, map.after.filter { filterCache.getValue(it.key) }))
             }
-            it is IncrementalMap.Move -> {
-                val filtered = filterCache.remove(it.key)!!
-                filterCache[it.outKey] = filtered
+            map is IncrementalMap.Move -> {
+                val filtered = filterCache.remove(map.key)!!
+                filterCache[map.outKey] = filtered
                 if (!filtered)
-                    emit(IncrementalMap.Move(it.key, it.outKey, it.after.filter { filterCache.getValue(it.key) }))
+                    emit(IncrementalMap.Move(map.key, map.outKey, map.after.filter { filterCache.getValue(it.key) }))
             }
-            it is IncrementalMap.Remove -> {
-                if (!filterCache.remove(it.key)!!)
-                    emit(IncrementalMap.Remove(it.key, it.after.filter { filterCache.getValue(it.key) }))
+            map is IncrementalMap.Remove -> {
+                if (!filterCache.remove(map.key)!!)
+                    emit(IncrementalMap.Remove(map.key, map.after.filter { filterCache.getValue(it.key) }))
             }
-            it is IncrementalMap.Update -> {
-                val wasFiltered = filterCache.getValue(it.key)
-                val filtered = predicate(it.key, @Suppress("UNCHECKED_CAST") (it.after[it.key] as R))
+            map is IncrementalMap.Update -> {
+                val wasFiltered = filterCache.getValue(map.key)
+                val filtered = predicate(map.key, @Suppress("UNCHECKED_CAST") (map.after[map.key] as R))
                 if (wasFiltered != filtered) {
-                    filterCache[it.key] = filtered
+                    filterCache[map.key] = filtered
                     if (wasFiltered) {
-                        emit(IncrementalMap.Insert(it.key, it.after.filter { filterCache.getValue(it.key) }))
+                        emit(IncrementalMap.Insert(map.key, map.after.filter { filterCache.getValue(it.key) }))
                     } else /* if (filtered) */ {
-                        emit(IncrementalMap.Remove(it.key, it.after.filter { filterCache.getValue(it.key) }))
+                        emit(IncrementalMap.Remove(map.key, map.after.filter { filterCache.getValue(it.key) }))
                     }
                 } else if (!filtered) {
-                    emit(IncrementalMap.Update(it.key, it.after.filter { filterCache.getValue(it.key) }))
+                    emit(IncrementalMap.Update(map.key, map.after.filter { filterCache.getValue(it.key) }))
                 }
             }
         }
@@ -555,22 +555,22 @@ inline fun <T, R> Flow<IncrementalMap<T, R>>.filterIncremental(
 inline fun <T, R, S> Flow<IncrementalMap<T, R>>.mapNonCachedIncremental(
     crossinline fastPredicate: (T, R) -> S
 ): Flow<IncrementalMap<T, S>> = flow {
-    collect {
-        when (it) {
+    collect { map ->
+        when (map) {
             is IncrementalMap.Begin -> {
-                emit(IncrementalMap.Begin(it.after.mapValues { fastPredicate(it.key, it.value) }))
+                emit(IncrementalMap.Begin(map.after.mapValues { fastPredicate(it.key, it.value) }))
             }
             is IncrementalMap.Insert -> {
-                emit(IncrementalMap.Insert(it.key, it.after.mapValues { fastPredicate(it.key, it.value) }))
+                emit(IncrementalMap.Insert(map.key, map.after.mapValues { fastPredicate(it.key, it.value) }))
             }
             is IncrementalMap.Move -> {
-                emit(IncrementalMap.Move(it.key, it.outKey, it.after.mapValues { fastPredicate(it.key, it.value) }))
+                emit(IncrementalMap.Move(map.key, map.outKey, map.after.mapValues { fastPredicate(it.key, it.value) }))
             }
             is IncrementalMap.Remove -> {
-                emit(IncrementalMap.Remove(it.key, it.after.mapValues { fastPredicate(it.key, it.value) }))
+                emit(IncrementalMap.Remove(map.key, map.after.mapValues { fastPredicate(it.key, it.value) }))
             }
             is IncrementalMap.Update -> {
-                emit(IncrementalMap.Update(it.key, it.after.mapValues { fastPredicate(it.key, it.value) }))
+                emit(IncrementalMap.Update(map.key, map.after.mapValues { fastPredicate(it.key, it.value) }))
             }
         }
     }
@@ -580,31 +580,31 @@ inline fun <T, R, S> Flow<IncrementalMap<T, R>>.mapIncremental(
     crossinline predicate: (T, R) -> S
 ): Flow<IncrementalMap<T, S>> = flow {
     var mapCache: HashMap<T, S>? = null
-    collect {
+    collect { map ->
         when {
-            it is IncrementalMap.Begin || mapCache == null -> {
+            map is IncrementalMap.Begin || mapCache == null -> {
                 if (mapCache != null)
                     mapCache!!.clear()
                 else
                     mapCache = HashMap()
-                mapCache.putAll(it.after.mapValues { predicate(it.key, it.value) })
-                emit(IncrementalMap.Begin(it.after.mapValues { mapCache.getValue(it.key) }))
+                mapCache.putAll(map.after.mapValues { predicate(it.key, it.value) })
+                emit(IncrementalMap.Begin(map.after.mapValues { mapCache.getValue(it.key) }))
             }
-            it is IncrementalMap.Insert -> {
-                mapCache[it.key] = predicate(it.key, @Suppress("UNCHECKED_CAST") (it.after[it.key] as R))
-                emit(IncrementalMap.Insert(it.key, it.after.mapValues { mapCache.getValue(it.key) }))
+            map is IncrementalMap.Insert -> {
+                mapCache[map.key] = predicate(map.key, @Suppress("UNCHECKED_CAST") (map.after[map.key] as R))
+                emit(IncrementalMap.Insert(map.key, map.after.mapValues { mapCache.getValue(it.key) }))
             }
-            it is IncrementalMap.Move -> {
-                mapCache[it.outKey] = mapCache.remove(it.key)!!
-                emit(IncrementalMap.Move(it.key, it.outKey, it.after.mapValues { mapCache.getValue(it.key) }))
+            map is IncrementalMap.Move -> {
+                mapCache[map.outKey] = mapCache.remove(map.key)!!
+                emit(IncrementalMap.Move(map.key, map.outKey, map.after.mapValues { mapCache.getValue(it.key) }))
             }
-            it is IncrementalMap.Remove -> {
-                mapCache.remove(it.key)
-                emit(IncrementalMap.Remove(it.key, it.after.mapValues { mapCache.getValue(it.key) }))
+            map is IncrementalMap.Remove -> {
+                mapCache.remove(map.key)
+                emit(IncrementalMap.Remove(map.key, map.after.mapValues { mapCache.getValue(it.key) }))
             }
-            it is IncrementalMap.Update -> {
-                mapCache[it.key] = predicate(it.key, @Suppress("UNCHECKED_CAST") (it.after[it.key] as R))
-                emit(IncrementalMap.Update(it.key, it.after.mapValues { mapCache.getValue(it.key) }))
+            map is IncrementalMap.Update -> {
+                mapCache[map.key] = predicate(map.key, @Suppress("UNCHECKED_CAST") (map.after[map.key] as R))
+                emit(IncrementalMap.Update(map.key, map.after.mapValues { mapCache.getValue(it.key) }))
             }
         }
     }
@@ -666,9 +666,9 @@ inline fun <T, R> Flow<IncrementalMap<T, Flow<R>>>.flattenIncremental(): Flow<In
                 }
             }
         }
-        collect {
+        collect { map ->
             when {
-                it is IncrementalMap.Begin || state == null -> {
+                map is IncrementalMap.Begin || state == null -> {
                     if (state != null) {
                         state!!.forEach { it.value.first.cancel() }
                         // must join all to avoid old jobs accessing outputState
@@ -678,38 +678,38 @@ inline fun <T, R> Flow<IncrementalMap<T, Flow<R>>>.flattenIncremental(): Flow<In
                     } else state = HashMap()
                     val deferred = PendingCommand.Begin()
                     pending = deferred
-                    state.putAll(it.after.mapValues { createFlattenJob(it.key, it.value, update) })
+                    state.putAll(map.after.mapValues { createFlattenJob(it.key, it.value, update) })
                     deferred.await()
                 }
-                it is IncrementalMap.Insert -> {
+                map is IncrementalMap.Insert -> {
                     val deferred = PendingCommand.Insert()
                     pending = deferred
-                    state[it.key] = createFlattenJob(it.key, it.after.getValue(it.key), update)
+                    state[map.key] = createFlattenJob(map.key, map.after.getValue(map.key), update)
                     deferred.await()
                 }
-                it is IncrementalMap.Move -> {
+                map is IncrementalMap.Move -> {
                     lock.withLock {
-                        val item = state.remove(it.key)!!
-                        item.second.set(it.outKey)
-                        state[it.outKey] = item
-                        outputState[it.outKey] = @Suppress("UNCHECKED_CAST") (outputState.remove(it.key) as R)
-                        send(IncrementalMap.Move(it.key, it.outKey, outputState.toMap()))
+                        val item = state.remove(map.key)!!
+                        item.second.set(map.outKey)
+                        state[map.outKey] = item
+                        outputState[map.outKey] = @Suppress("UNCHECKED_CAST") (outputState.remove(map.key) as R)
+                        send(IncrementalMap.Move(map.key, map.outKey, outputState.toMap()))
                     }
                 }
-                it is IncrementalMap.Remove -> {
+                map is IncrementalMap.Remove -> {
                     lock.withLock {
-                        state.remove(it.key)!!.first.cancelAndJoin()
-                        outputState.remove(it.key)
-                        send(IncrementalMap.Remove(it.key, outputState))
+                        state.remove(map.key)!!.first.cancelAndJoin()
+                        outputState.remove(map.key)
+                        send(IncrementalMap.Remove(map.key, outputState))
                     }
                 }
-                it is IncrementalMap.Update -> {
+                map is IncrementalMap.Update -> {
                     lock.withLock {
-                        state.remove(it.key)!!.first.cancelAndJoin()
+                        state.remove(map.key)!!.first.cancelAndJoin()
                     }
                     val deferred = PendingCommand.Update()
                     pending = deferred
-                    state[it.key] = createFlattenJob(it.key, it.after.getValue(it.key), update)
+                    state[map.key] = createFlattenJob(map.key, map.after.getValue(map.key), update)
                     deferred.await()
                 }
             }

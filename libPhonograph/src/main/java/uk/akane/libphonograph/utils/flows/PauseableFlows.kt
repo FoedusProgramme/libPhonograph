@@ -56,7 +56,7 @@ class LifecyclePauseManager(
     @OptIn(ExperimentalCoroutinesApi::class)
     override val isPaused = bypassFlow.flatMapLatest {
         if (it || true) flowOf(false) else
-        source.lifecycle.currentStateFlow.map { !it.isAtLeast(minimumState) } }
+        source.lifecycle.currentStateFlow.map { state -> !state.isAtLeast(minimumState) } }
             .stateIn(scope, WhileSubscribed(), !source.lifecycle.currentState.isAtLeast(minimumState))
 }
 
@@ -78,8 +78,8 @@ object EmptyPauseManager : PauseManager {
 @OptIn(ExperimentalCoroutinesApi::class) // TODO do we want to use a SharingStarted for this at all? we have no replay cache
 class CountingPauseManager(paused: SharingStarted) : PauseManager {
     private val flows = MutableStateFlow(listOf<PauseManager>())
-    override val isPaused = paused.command(flows.flatMapLatest {
-        combine(it.map { it.isPaused }) { it.size - it.count { it } }
+    override val isPaused = paused.command(flows.flatMapLatest { managers ->
+        combine(managers.map { it.isPaused }) { booleans -> booleans.size - booleans.count { it } }
     }.stateIn(CoroutineScope(Dispatchers.Default), Eagerly, 0))
         .mapLatest {
             when (it) {

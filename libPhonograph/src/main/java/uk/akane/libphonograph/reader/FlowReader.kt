@@ -22,12 +22,7 @@ import kotlinx.coroutines.flow.mapLatest
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.shareIn
 import kotlinx.coroutines.launch
-import uk.akane.libphonograph.utils.flows.Invalidation
-import uk.akane.libphonograph.utils.flows.PauseManagingSharedFlow.Companion.sharePauseableIn
-import uk.akane.libphonograph.utils.flows.conflateAndBlockWhenPaused
-import uk.akane.libphonograph.utils.flows.provideReplayCacheInvalidationManager
-import uk.akane.libphonograph.utils.flows.repeatUntilDoneWhenUnpaused
-import uk.akane.libphonograph.utils.flows.requireReplayCacheInvalidationManager
+import uk.akane.libphonograph.Flags
 import uk.akane.libphonograph.contentObserverVersioningFlow
 import uk.akane.libphonograph.dynamicitem.Favorite
 import uk.akane.libphonograph.dynamicitem.RecentlyAdded
@@ -36,8 +31,13 @@ import uk.akane.libphonograph.items.Album
 import uk.akane.libphonograph.items.Artist
 import uk.akane.libphonograph.items.Date
 import uk.akane.libphonograph.items.FileNode
-import uk.akane.libphonograph.items.Flags
 import uk.akane.libphonograph.items.Genre
+import uk.akane.libphonograph.utils.flows.Invalidation
+import uk.akane.libphonograph.utils.flows.PauseManagingSharedFlow.Companion.sharePauseableIn
+import uk.akane.libphonograph.utils.flows.conflateAndBlockWhenPaused
+import uk.akane.libphonograph.utils.flows.provideReplayCacheInvalidationManager
+import uk.akane.libphonograph.utils.flows.repeatUntilDoneWhenUnpaused
+import uk.akane.libphonograph.utils.flows.requireReplayCacheInvalidationManager
 
 /**
  * SimpleReader reimplementation using flows with focus on efficiency.

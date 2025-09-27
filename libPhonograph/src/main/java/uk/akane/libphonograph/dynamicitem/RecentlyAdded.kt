@@ -19,8 +19,8 @@ class RecentlyAdded(minAddDate: Long, songList: List<MediaItem>) : Playlist(null
         get() = filteredList
     private fun filterList(minAddDate: Long): List<MediaItem> {
         return if (rawList.isEmpty()) rawList else rawList.let { l ->
-            l.binarySearch {
-                it.mediaMetadata.addDate?.let { minAddDate.compareTo(it) } ?: -1
+            l.binarySearch { item ->
+                item.mediaMetadata.addDate?.let { minAddDate.compareTo(it) } ?: -1
             }.let {
                 if (it >= 0) it else (-it - 1) // insertion point ~= first index
             }
