@@ -826,7 +826,7 @@ private data class ReaderResult2(
     val canonicalArtistIdMap: Map<String, Long>,
 )
 private var useEnhancedCoverReading = true
-private var coverStubUri: String? = "gramophoneCover"//TODO
+private var coverStubUri: String? = "gramophoneAlbumCover"//TODO
 private val scope = CoroutineScope(Dispatchers.Default)
 private val readerFlow: SharedFlow<ReaderResult2> = TODO()
     .provideReplayCacheInvalidationManager<ReaderResult2>(copyDownstream = Invalidation.Optional)

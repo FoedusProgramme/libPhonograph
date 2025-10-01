@@ -53,9 +53,6 @@ import java.time.ZoneId
 import kotlin.math.min
 
 internal object Reader {
-    // not actually defined in API, but CTS tested
-    // https://cs.android.com/android/platform/superproject/main/+/main:packages/providers/MediaProvider/src/com/android/providers/media/LocalUriMatcher.java;drc=ddf0d00b2b84b205a2ab3581df8184e756462e8d;l=182
-    private const val MEDIA_ALBUM_ART = "albumart"
 
     private val trackNumberRegex = Regex("^([0-9]+)\\..*$")
     private val projection =
@@ -284,9 +281,8 @@ internal object Reader {
                 val dateTakenDay = if (hasImprovedMediaStore()) {
                     dateTakenParsed?.dayOfMonth
                 } else null
-                val imgUri = ContentUris.appendId(
-                    MediaStore.Audio.Media.EXTERNAL_CONTENT_URI.buildUpon(), id
-                ).appendPath(MEDIA_ALBUM_ART).build()
+                val imgUri = Uri.Builder().scheme("gramophoneSongCover")
+                    .authority(id.toString()).path(path).build()
 
                 if (cdTrackNumber != null && trackNumber == null) {
                     cdTrackNumber.toIntOrNull()?.let {
