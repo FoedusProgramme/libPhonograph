@@ -10,7 +10,6 @@ import android.content.pm.PackageManager
 import android.media.MediaScannerConnection
 import android.net.Uri
 import android.os.Build
-import android.os.Environment
 import android.os.Process
 import android.provider.MediaStore
 import android.util.Log
@@ -118,8 +117,10 @@ object ItemManipulator {
     }
 
     fun createPlaylist(context: Context, name: String): File {
-        val parent = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MUSIC)
-        val out = File(parent, "$name.m3u")
+        val safeName = name.replace(Regex("[/\\\\]"), "_").trim()
+        val finalName = if (safeName.isBlank()) "Playlist" else safeName
+        val parent = PlaylistSerializer.getPrivatePlaylistDir(context)
+        val out = File(parent, "$finalName.m3u")
         if (out.exists())
             throw IllegalArgumentException("tried to create playlist $out that already exists")
         PlaylistSerializer.write(context.applicationContext, out, listOf())
@@ -179,27 +180,30 @@ object ItemManipulator {
     fun addToPlaylist(context: Context, out: File, songs: List<File>) {
         if (!out.exists())
             throw IllegalArgumentException("tried to change playlist $out that doesn't exist")
+        if (PlaylistSerializer.isAppPrivatePlaylist(context, out)) {
+            val existing = PlaylistSerializer.readPrivatePlaylistEntries(out)
+            val additions = songs.map { PlaylistSerializer.buildPrivatePlaylistEntry(context, it) }
+            PlaylistSerializer.writePrivatePlaylistEntries(
+                out,
+                existing + additions
+            )
+            return
+        }
         setPlaylistContent(context, out, PlaylistSerializer.read(out) + songs)
     }
 
     fun setPlaylistContent(context: Context, out: File, songs: List<File>) {
         if (!out.exists())
             throw IllegalArgumentException("tried to change playlist $out that doesn't exist")
-        val backup = out.readBytes()
+        if (PlaylistSerializer.isAppPrivatePlaylist(context, out)) {
+            val entries = songs.map { PlaylistSerializer.buildPrivatePlaylistEntry(context, it) }
+            PlaylistSerializer.writePrivatePlaylistEntries(out, entries)
+            return
+        }
         try {
             PlaylistSerializer.write(context.applicationContext, out, songs)
         } catch (t: Throwable) {
-            try {
-                PlaylistSerializer.write(context.applicationContext, out.resolveSibling(
-                    "${out.nameWithoutExtension}_NEW_${System.currentTimeMillis()}.m3u"), songs)
-            } catch (t: Throwable) {
-                Log.e(TAG, Log.getStackTraceString(t))
-            }
-            try {
-                out.resolveSibling("${out.nameWithoutExtension}_BAK_${System.currentTimeMillis()}.${out.extension}").writeBytes(backup)
-            } catch (t: Throwable) {
-                Log.e(TAG, Log.getStackTraceString(t))
-            }
+            Log.e(TAG, Log.getStackTraceString(t))
             throw t
         }
     }

@@ -574,6 +574,82 @@ internal object Reader {
                     playlistDateAdded, playlistDateModified, content, paths))
             }
         }
+        val privatePlaylists = readPrivatePlaylists(context)
+        if (privatePlaylists.isNotEmpty()) {
+            if (privatePlaylists.any { it.pathList?.isNotEmpty() == true }) {
+                foundPlaylistContent = true
+            }
+            playlists.addAll(privatePlaylists)
+        }
         return Pair(playlists, foundPlaylistContent)
     }
+
+    private fun readPrivatePlaylists(context: Context): List<RawPlaylist> {
+        val dir = PlaylistSerializer.getPrivatePlaylistDir(context)
+        val files = dir.listFiles { file ->
+            file.isFile && (file.extension.equals("m3u", true) || file.extension.equals("m3u8", true))
+        } ?: return emptyList()
+        return files.mapNotNull { file ->
+            val entries = try {
+                PlaylistSerializer.readPrivatePlaylistEntries(file)
+            } catch (e: IOException) {
+                Log.w("Reader", "failed to read private playlist $file", e)
+                null
+            } ?: return@mapNotNull null
+            val migratedEntries = migratePrivatePlaylistEntries(context, file, entries)
+            val idList = mutableListOf<Long?>()
+            val pathList = mutableListOf<File?>()
+            migratedEntries.forEach { entry ->
+                if (entry.startsWith(PlaylistSerializer.ACCORD_ID_PREFIX)) {
+                    val id = entry.removePrefix(PlaylistSerializer.ACCORD_ID_PREFIX).toLongOrNull()
+                    idList.add(id)
+                    pathList.add(null)
+                } else {
+                    val resolved = PlaylistSerializer.resolveEntryFile(file, entry)
+                    idList.add(PlaylistSerializer.resolveAudioId(context, resolved))
+                    pathList.add(resolved)
+                }
+            }
+            val timestamp = (file.lastModified() / 1000L).takeIf { it > 0 }
+            RawPlaylist(
+                privatePlaylistId(file),
+                file.nameWithoutExtension,
+                file,
+                timestamp,
+                timestamp,
+                idList,
+                pathList
+            )
+        }
+    }
+
+    private fun migratePrivatePlaylistEntries(
+        context: Context,
+        file: File,
+        entries: List<String>
+    ): List<String> {
+        val migrated = entries.map { entry ->
+            if (entry.startsWith(PlaylistSerializer.ACCORD_ID_PREFIX)) {
+                entry
+            } else {
+                val resolved = PlaylistSerializer.resolveEntryFile(file, entry)
+                PlaylistSerializer.buildPrivatePlaylistEntry(context, resolved)
+            }
+        }
+        if (migrated != entries) {
+            runCatching {
+                PlaylistSerializer.writePrivatePlaylistEntries(file, migrated)
+            }.onFailure {
+                Log.w("Reader", "failed to migrate private playlist $file", it)
+            }
+        }
+        return migrated
+    }
+
+    private fun privatePlaylistId(file: File): Long {
+        val hash = file.absolutePath.hashCode().toLong()
+        val positive = (hash and 0x7fffffff).let { if (it == 0L) 1L else it }
+        return -positive
+    }
+
 }
