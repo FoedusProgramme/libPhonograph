@@ -8,6 +8,7 @@ import uk.akane.libphonograph.items.EmptyFileNode
 import uk.akane.libphonograph.items.FileNode
 import uk.akane.libphonograph.items.Genre
 import uk.akane.libphonograph.items.Playlist
+import uk.akane.libphonograph.items.RawPlaylist
 
 data class ReaderResult(
     val songList: List<MediaItem>,
@@ -42,4 +43,10 @@ data class SimpleReaderResult(
     val folderStructure: FileNode,
     val shallowFolder: FileNode,
     val folders: Set<String>
+)
+
+data class PlaylistFetchResult(
+    val playlists: List<RawPlaylist>,
+    val foundPlaylistContent: Boolean,
+    val extraPathMap: Map<String, MediaItem>
 )

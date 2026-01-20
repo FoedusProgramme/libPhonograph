@@ -498,9 +498,10 @@ internal object Reader {
         )
     }
 
-    fun fetchPlaylists(context: Context): Pair<List<RawPlaylist>, Boolean> {
+    fun fetchPlaylists(context: Context): PlaylistFetchResult {
         var foundPlaylistContent = false
         val playlists = mutableListOf<RawPlaylist>()
+        val extraPathMap = hashMapOf<String, MediaItem>()
         context.contentResolver.query(
             @Suppress("DEPRECATION")
             MediaStore.Audio.Playlists.EXTERNAL_CONTENT_URI, arrayOf(
@@ -575,21 +576,28 @@ internal object Reader {
             }
         }
         val privatePlaylists = readPrivatePlaylists(context)
-        if (privatePlaylists.isNotEmpty()) {
-            if (privatePlaylists.any { it.pathList?.isNotEmpty() == true }) {
+        if (privatePlaylists.first.isNotEmpty()) {
+            if (privatePlaylists.first.any { it.pathList?.isNotEmpty() == true }) {
                 foundPlaylistContent = true
             }
-            playlists.addAll(privatePlaylists)
+            playlists.addAll(privatePlaylists.first)
+            if (privatePlaylists.second.isNotEmpty()) {
+                extraPathMap.putAll(privatePlaylists.second)
+                foundPlaylistContent = true
+            }
         }
-        return Pair(playlists, foundPlaylistContent)
+        return PlaylistFetchResult(playlists, foundPlaylistContent, extraPathMap)
     }
 
-    private fun readPrivatePlaylists(context: Context): List<RawPlaylist> {
+    private fun readPrivatePlaylists(
+        context: Context
+    ): Pair<List<RawPlaylist>, Map<String, MediaItem>> {
         val dir = PlaylistSerializer.getPrivatePlaylistDir(context)
         val files = dir.listFiles { file ->
             file.isFile && (file.extension.equals("m3u", true) || file.extension.equals("m3u8", true))
-        } ?: return emptyList()
-        return files.mapNotNull { file ->
+        } ?: return emptyList<RawPlaylist>() to emptyMap()
+        val extraPathMap = hashMapOf<String, MediaItem>()
+        val playlists = files.mapNotNull { file ->
             val entries = try {
                 PlaylistSerializer.readPrivatePlaylistEntries(file)
             } catch (e: IOException) {
@@ -604,6 +612,14 @@ internal object Reader {
                     val id = entry.removePrefix(PlaylistSerializer.ACCORD_ID_PREFIX).toLongOrNull()
                     idList.add(id)
                     pathList.add(null)
+                } else if (entry.startsWith(PlaylistSerializer.ACCORD_ITEM_PREFIX)) {
+                    val item = PlaylistSerializer.decodePrivatePlaylistEntry(entry)
+                    val virtualPath = File("/accord/virtual/${entry.hashCode()}")
+                    idList.add(null)
+                    pathList.add(virtualPath)
+                    if (item != null) {
+                        extraPathMap[virtualPath.absolutePath] = item
+                    }
                 } else {
                     val resolved = PlaylistSerializer.resolveEntryFile(file, entry)
                     idList.add(PlaylistSerializer.resolveAudioId(context, resolved))
@@ -621,6 +637,7 @@ internal object Reader {
                 pathList
             )
         }
+        return playlists to extraPathMap
     }
 
     private fun migratePrivatePlaylistEntries(
@@ -629,7 +646,9 @@ internal object Reader {
         entries: List<String>
     ): List<String> {
         val migrated = entries.map { entry ->
-            if (entry.startsWith(PlaylistSerializer.ACCORD_ID_PREFIX)) {
+            if (entry.startsWith(PlaylistSerializer.ACCORD_ID_PREFIX) ||
+                entry.startsWith(PlaylistSerializer.ACCORD_ITEM_PREFIX)
+            ) {
                 entry
             } else {
                 val resolved = PlaylistSerializer.resolveEntryFile(file, entry)

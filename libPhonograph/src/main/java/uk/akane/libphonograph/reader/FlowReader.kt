@@ -81,9 +81,11 @@ class FlowReader(
             .conflateAndBlockWhenPaused()
             .flatMapLatest {
                 manualRefreshTrigger.mapLatest { _ ->
-                    if (context.hasAudioPermission())
-                        Reader.fetchPlaylists(context).first
-                    else emptyList()
+                    if (context.hasAudioPermission()) {
+                        Reader.fetchPlaylists(context)
+                    } else {
+                        PlaylistFetchResult(emptyList(), false, emptyMap())
+                    }
                 }
             }
             .provideReplayCacheInvalidationManager(copyDownstream = Invalidation.Optional)
@@ -149,8 +151,16 @@ class FlowReader(
         }
         .provideReplayCacheInvalidationManager(copyDownstream = Invalidation.Optional)
         .sharePauseableIn(scope, WhileSubscribed(20000), WhileSubscribed(2000), replay = 1)
-    private val mappedPlaylistsFlow = idPathMapFlow.combine(rawPlaylistFlow) { idPathMap, rawPlaylists ->
-        rawPlaylists.map { it.toPlaylist(idPathMap.first, idPathMap.second) }
+    private val mappedPlaylistsFlow = idPathMapFlow.combine(rawPlaylistFlow) { idPathMap, playlistResult ->
+        val mergedPathMap = if (playlistResult.extraPathMap.isEmpty()) {
+            idPathMap.second
+        } else {
+            val merged = HashMap<String, MediaItem>()
+            merged.putAll(idPathMap.second)
+            merged.putAll(playlistResult.extraPathMap)
+            merged
+        }
+        playlistResult.playlists.map { it.toPlaylist(idPathMap.first, mergedPathMap) }
     }
     val albumListFlow: Flow<List<Album>> = readerFlow.map { it.albumList!! }
     val albumArtistListFlow: Flow<List<Artist>> = readerFlow.map { it.albumArtistList!! }

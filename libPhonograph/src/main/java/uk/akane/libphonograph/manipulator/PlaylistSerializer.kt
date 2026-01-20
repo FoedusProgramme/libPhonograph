@@ -7,12 +7,18 @@ import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
 import android.util.Log
+import android.util.Base64
+import androidx.media3.common.MediaItem
+import androidx.media3.common.MediaMetadata
 import java.io.File
+import java.nio.charset.StandardCharsets
+import org.json.JSONObject
 
 object PlaylistSerializer {
     private const val TAG = "PlaylistSerializer"
     const val ACCORD_PRIVATE_DIR = "accord_playlists"
     const val ACCORD_ID_PREFIX = "MediaStore:"
+    const val ACCORD_ITEM_PREFIX = "AccordItem:"
 
     @Throws(UnsupportedPlaylistFormatException::class)
     fun write(context: Context, outFile: File, songs: List<File>) {
@@ -118,6 +124,74 @@ object PlaylistSerializer {
     fun buildPrivatePlaylistEntry(context: Context, song: File): String {
         val id = resolveAudioId(context, song)
         return if (id != null) "$ACCORD_ID_PREFIX$id" else song.absolutePath
+    }
+
+    fun buildPrivatePlaylistEntry(item: MediaItem): String? {
+        return runCatching {
+            val metadata = item.mediaMetadata
+            val mediaId = item.mediaId
+            if (mediaId.isBlank()) return@runCatching null
+            val obj = JSONObject().apply {
+                put("media_id", mediaId)
+                item.localConfiguration?.uri?.toString()?.let { put("uri", it) }
+                item.localConfiguration?.mimeType?.let { put("mime_type", it) }
+                item.localConfiguration?.customCacheKey?.let { put("custom_cache_key", it) }
+                metadata.title?.toString()?.let { put("title", it) }
+                metadata.artist?.toString()?.let { put("artist", it) }
+                metadata.albumTitle?.toString()?.let { put("album", it) }
+                metadata.albumArtist?.toString()?.let { put("album_artist", it) }
+                metadata.artworkUri?.toString()?.let { put("artwork_uri", it) }
+                metadata.durationMs?.takeIf { it > 0 }?.let { put("duration_ms", it) }
+            }
+            val encoded = Base64.encodeToString(
+                obj.toString().toByteArray(StandardCharsets.UTF_8),
+                Base64.NO_WRAP
+            )
+            "$ACCORD_ITEM_PREFIX$encoded"
+        }.getOrNull()
+    }
+
+    fun decodePrivatePlaylistEntry(entry: String): MediaItem? {
+        if (!entry.startsWith(ACCORD_ITEM_PREFIX)) return null
+        return runCatching {
+            val payload = entry.removePrefix(ACCORD_ITEM_PREFIX)
+            val decoded = String(
+                Base64.decode(payload, Base64.DEFAULT),
+                StandardCharsets.UTF_8
+            )
+            val obj = JSONObject(decoded)
+            val mediaId = obj.optString("media_id").orEmpty()
+            if (mediaId.isBlank()) return@runCatching null
+            val uri = obj.optString("uri").takeIf { it.isNotBlank() }?.let { Uri.parse(it) }
+            val mimeType = obj.optString("mime_type").takeIf { it.isNotBlank() }
+            val customCacheKey = obj.optString("custom_cache_key").takeIf { it.isNotBlank() }
+            val metadata = MediaMetadata.Builder()
+                .setTitle(obj.optString("title").takeIf { it.isNotBlank() })
+                .setArtist(obj.optString("artist").takeIf { it.isNotBlank() })
+                .setAlbumTitle(obj.optString("album").takeIf { it.isNotBlank() })
+                .setAlbumArtist(obj.optString("album_artist").takeIf { it.isNotBlank() })
+                .setMediaType(MediaMetadata.MEDIA_TYPE_MUSIC)
+                .setIsBrowsable(false)
+                .setIsPlayable(true)
+                .apply {
+                    val artwork = obj.optString("artwork_uri").takeIf { it.isNotBlank() }
+                    if (artwork != null) {
+                        setArtworkUri(Uri.parse(artwork))
+                    }
+                    val duration = obj.optLong("duration_ms", 0L)
+                    if (duration > 0) {
+                        setDurationMs(duration)
+                    }
+                }
+                .build()
+            val builder = MediaItem.Builder()
+                .setMediaId(mediaId)
+                .setMediaMetadata(metadata)
+            if (uri != null) builder.setUri(uri)
+            if (mimeType != null) builder.setMimeType(mimeType)
+            if (customCacheKey != null) builder.setCustomCacheKey(customCacheKey)
+            builder.build()
+        }.getOrNull()
     }
 
     fun resolveEntryFile(outFile: File, entry: String): File {

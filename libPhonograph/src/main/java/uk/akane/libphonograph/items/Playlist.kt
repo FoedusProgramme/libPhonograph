@@ -42,7 +42,7 @@ open class Playlist protected constructor(
     }
 }
 
-internal data class RawPlaylist(
+data class RawPlaylist(
     val id: Long,
     val title: String?,
     val path: File?,

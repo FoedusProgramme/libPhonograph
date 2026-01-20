@@ -1,6 +1,7 @@
 package uk.akane.libphonograph.reader
 
 import android.content.Context
+import androidx.media3.common.MediaItem
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
@@ -16,15 +17,23 @@ object SimpleReader {
         shouldIncludeExtraFormat: Boolean = true,
         coverStubUri: String? = null
     ): SimpleReaderResult {
-        val (playlists, foundPlaylistContent) = Reader.fetchPlaylists(context)
+        val playlistResult = Reader.fetchPlaylists(context)
         val result = runBlocking {
             withContext(Dispatchers.Default) {
                 Reader.readFromMediaStore(
                     context, minSongLengthSeconds, blackListSet,
                     shouldUseEnhancedCoverReading, shouldIncludeExtraFormat,
-                    shouldLoadIdMap = foundPlaylistContent, coverStubUri = coverStubUri
+                    shouldLoadIdMap = playlistResult.foundPlaylistContent, coverStubUri = coverStubUri
                 )
             }
+        }
+        val mergedPathMap = if (playlistResult.extraPathMap.isEmpty()) {
+            result.pathMap
+        } else {
+            val merged = HashMap<String, MediaItem>()
+            result.pathMap?.let { merged.putAll(it) }
+            merged.putAll(playlistResult.extraPathMap)
+            merged
         }
         // We can null assert because we never pass shouldLoad*=false into Reader
         return SimpleReaderResult(
@@ -34,7 +43,7 @@ object SimpleReader {
             result.artistList!!,
             result.genreList!!,
             result.dateList!!,
-            playlists.map { it.toPlaylist(result.idMap, result.pathMap) }.let {
+            playlistResult.playlists.map { it.toPlaylist(result.idMap, mergedPathMap) }.let {
                 if (recentlyAddedFilterSecond != null)
                     it + RecentlyAdded(
                         (System.currentTimeMillis() / 1000L) - recentlyAddedFilterSecond,
