@@ -414,7 +414,8 @@ internal object Reader {
                     while (tmpPath != null) {
                         folders!!.add(tmpPath.absolutePath)
                         tmpPath = tmpPath.parentFile
-                        if (tmpPath.absolutePath == "/storage/emulated" || tmpPath.absolutePath == "/storage")
+                        if (tmpPath != null && (tmpPath.absolutePath == "/storage/emulated"
+                                    || tmpPath.absolutePath == "/storage"))
                             tmpPath = null // lets not allow to blacklist more than entire volumes
                     }
                 }
@@ -477,7 +478,8 @@ internal object Reader {
                 while (tmpPath != null) {
                     folders.add(tmpPath.absolutePath)
                     tmpPath = tmpPath.parentFile
-                    if (tmpPath.absolutePath == "/storage/emulated" || tmpPath.absolutePath == "/storage")
+                    if (tmpPath != null && (tmpPath.absolutePath == "/storage/emulated"
+                                || tmpPath.absolutePath == "/storage"))
                         tmpPath = null // lets not allow to blacklist more than entire volumes
                 }
             }
